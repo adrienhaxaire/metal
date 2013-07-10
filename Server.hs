@@ -16,6 +16,7 @@ method s = case s of
 header :: String -> String
 header s = "HTTP/1.1 200 OK \nContent-Type: text/html\n\n" ++ s ++ "\n"
 
+respond :: Handle -> IO ()
 respond handle = do
   hSetBuffering handle NoBuffering
   reqHeader <- hGetLine handle
@@ -25,10 +26,11 @@ respond handle = do
 --    POST ->respondPOST uri handle
 
 respond404 :: String -> Handle -> IO ()
-respond404 uri handle =
-  let h = "HTTP/1.1 404 Not Found\nContent-Type: text/plain\n\n"
-          ++ "File " ++ uri ++ " not found.\n"
-  in hPutStr handle h
+respond404 uri handle = do
+  b <- readFile "404.html"
+  let h = "HTTP/1.1 404 Not Found\nContent-Type: text/html\n\n"
+  hPutStr handle $ h ++ b
+  hClose handle
 
 respondGET :: String -> Handle -> IO ()
 respondGET uri handle =
@@ -36,14 +38,58 @@ respondGET uri handle =
   exists <- doesFileExist file
   if exists then do contents <- readFile file
                     hPutStr handle $ header contents
+                    hClose handle
   else respond404 file handle
 
-main = withSocketsDo $ do
+server :: IO()
+server = withSocketsDo $ do
   socket <- listenOn (PortNumber 8002)
-  (handle, hostname, port) <- accept socket
-  respond handle
+  forever $ do
+      (handle, hostname, port) <- accept socket
+      process handle
 
 
+type Response = TVar String
 
+newResponse :: String -> STM Response
+newResponse s = newTVar s
+
+writeToResponse :: Response -> String -> STM ()
+writeToResponse r s = do
+  writeTVar r s
+  return ()
+
+readFromResponse :: Response -> STM String
+readFromResponse r = do
+  s <- readTVar r
+  return s
+
+respondSTM :: String -> IO String
+respondSTM line = atomically $ do
+  r <- newResponse line
+  s <- readFromResponse r
+  return s
+
+process :: Handle -> IO ThreadId
+process handle = do
+  forkIO $ respond handle
+
+-- atomically :: STM a -> IO a
+processSTM :: Handle -> IO ()
+processSTM handle = do
+  hSetBuffering handle NoBuffering
+  line <- hGetLine handle
+  cts <- respondSTM line
+  hPutStr handle $ header cts
+  hClose handle
+
+serverSTM :: IO()
+serverSTM = withSocketsDo $ do
+  socket <- listenOn (PortNumber 8002)
+  forever $ do
+      (handle, hostname, port) <- accept socket
+      processSTM handle
+
+main = serverSTM
 
 
