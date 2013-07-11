@@ -4,16 +4,13 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.STM
-import System.Directory
 
 type Response = TVar String
 
 prepareResponse :: String -> STM Response
-prepareResponse s = do
-  r <- newTVar ""
-  let b = "HTTP/1.1 200 OK \nContent-Type: text/plain\n\n" ++ s ++ "\n"
-  writeTVar r b
-  return r
+prepareResponse s = newTVar $
+                    "HTTP/1.1 200 OK \nContent-Type: text/plain\n\n"
+                    ++ s ++ "\n"
 
 showResponse :: String -> IO String
 showResponse lines = atomically $ prepareResponse lines >>= readTVar
@@ -21,9 +18,7 @@ showResponse lines = atomically $ prepareResponse lines >>= readTVar
 serve :: Handle -> IO ()
 serve handle = do
   hSetBuffering handle NoBuffering
-  lines <- hGetLine handle
-  r <- showResponse lines
-  hPutStr handle r
+  hGetLine handle >>= showResponse >>= hPutStr handle
   hClose handle
 
 server :: IO ()
