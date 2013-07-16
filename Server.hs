@@ -18,11 +18,9 @@ type Response = TVar Resp
 
 data Method = GET | POST | PUT | UNKNOWN deriving Show
 
+-- thank you Real World Haskell!
 instance Read Method where
-    readsPrec _ value = tryParse [("GET", GET)
-                                 , ("POST", POST)
-                                 , ("PUT", PUT)
-                                 , ("", UNKNOWN)]
+    readsPrec _ value = tryParse [("GET", GET), ("POST", POST), ("PUT", PUT), ("", UNKNOWN)]
         where tryParse [] = []
               tryParse ((attempt, result):xs) =
                       if take (length attempt) value == attempt
