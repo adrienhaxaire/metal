@@ -6,9 +6,8 @@ import Control.Monad
 import Control.Monad.STM
 import qualified Data.ByteString as B
 import qualified Data.Map as M
-import qualified Data.List as L
 import Data.List.Split
-
+import Data.Maybe
 
 data Resp = Resp { respHeader :: M.Map String String
                  , respData :: B.ByteString}
@@ -35,13 +34,13 @@ data Request = Request { reqMethod :: Method
                        , reqData :: B.ByteString}
                deriving Show
 
-
 emptyRequest :: Request
 emptyRequest = Request UNKNOWN "" M.empty B.empty
 
 readRequest :: Handle -> IO Request
-readRequest = readRequestHeader
-
+readRequest handle = do
+  req <- readRequestHeader handle
+  readRequestData req handle
 
 readRequestHeader :: Handle -> IO Request
 readRequestHeader handle = do
@@ -57,6 +56,11 @@ readRequestHeader handle = do
                 else return r
         else return r
 
+setMethodURI :: String -> Request -> Request
+setMethodURI line req = 
+    let [m, u, p] = splitOn " " line
+    in req {reqMethod = read m, reqURI = u}
+
 addToRequestHeader :: String -> Request -> Request
 addToRequestHeader line req = 
     let [k, v] = splitOn ": " line 
@@ -66,35 +70,60 @@ addToRequestHeader line req =
 hasMethod :: String -> Bool
 hasMethod line = take (length "HTTP/1.1") (reverse line) == "1.1/PTTH"
 
-setMethodURI :: String -> Request -> Request
-setMethodURI line req = 
-    let [m, u, p] = splitOn " " line
-    in req {reqMethod = read m, reqURI = u}
+requestMethod :: Request -> Method
+requestMethod = reqMethod
 
+isRequestType :: Method -> Request -> Bool
+isRequestType m req = isJust $ M.lookup (show m) (reqHeader req)
 
-{-
+isGetRequest, isPostRequest, isPutRequest :: Request -> Bool
+isGetRequest = isRequestType GET
+isPostRequest = isRequestType POST
+isPutRequest = isRequestType PUT
+
+hasData :: Request -> Bool
+hasData req = isJust $ M.lookup "Content-Length" (reqHeader req)
+
 readRequestData :: Request -> Handle -> IO Request
 readRequestData req handle = 
-    if isGetRequest req 
-    then return req 
+    if not $ hasData req then return req 
     else do 
-      rdata <- B.hGet handle 4 -- $ contentLength req
-      print rdata
+      rdata <- B.hGet handle $ contentLength req
       return $ req {reqData = rdata}
 
 contentLength :: Request -> Int
-contentLength req = 
-    let cl = "Content-Length: "
-        hasCL x = take (length cl) x == cl
-        content_length = head $ filter hasCL $ reqHeader req
-    in read $ drop (length cl) content_length
--}
+contentLength req = read $ fromMaybe "0" $ M.lookup "Content-Length" (reqHeader req)
+
+respond :: Handle -> Request -> IO ()
+respond handle req = case reqMethod req of
+                       GET -> respondGet handle req
+                       POST -> respondPost handle req
+                       PUT -> respondPut handle req
+                       UNKNOWN -> error "Wrong type of request" -- TODO
+
+respondGet :: Handle -> Request -> IO ()
+respondGet handle req = do
+  hPutStrLn handle "HTTP/1.1 200 OK"
+  hPutStrLn handle "Content-Type: text/plain\n"
+  hPutStrLn handle $ show req
+
+respondPost :: Handle -> Request -> IO ()
+respondPost = respondGet
+
+respondPut :: Handle -> Request -> IO ()
+respondPut handle req = do
+    fh <- openFile ('.' : reqURI req) WriteMode
+    B.hPut fh (reqData req)
+    hClose fh
+    hPutStrLn handle "HTTP/1.1 200 OK"
+    hPutStrLn handle "Content-Type: text/plain\n"
+    hPutStrLn handle "Upload successful"
 
 serve :: Handle -> IO ()
 serve handle = do
   hSetBuffering handle NoBuffering
   request <- readRequest handle
-  print request
+  respond handle request
   hClose handle -- do not close if keep alive
 --  response <- respond request
 --  hPutStr responseHeader
