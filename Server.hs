@@ -1,17 +1,23 @@
-import Network
+import Network as N
 import System.IO
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.STM
-import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
 import Data.List.Split
 import Data.Maybe
+import Text.Blaze.Html5 as H
+import Text.Blaze.Html5.Attributes as A
+import Text.Blaze.Html.Renderer.Pretty
 
-data Resp = Resp { respHeader :: M.Map String String
-                 , respData :: B.ByteString}
-           deriving (Eq, Ord, Show)
+
+
+data Resp = Resp { respStatusLine :: String
+                 , respHeader :: M.Map String String
+                 , respBody :: B.ByteString}
+           deriving Show
 
 type Response = TVar Resp
 
@@ -51,13 +57,13 @@ readRequestHeader handle = do
         isReady <- hReady handle
         if isReady 
         then do line <- hGetLine handle
-                if hasMethod line then go h $ setMethodURI line r
+                if hasMethod line then go h $ setRequestMethodURI line r
                 else if ':' `elem` line then go h $ addToRequestHeader line r
                 else return r
         else return r
 
-setMethodURI :: String -> Request -> Request
-setMethodURI line req = 
+setRequestMethodURI :: String -> Request -> Request
+setRequestMethodURI line req = 
     let [m, u, p] = splitOn " " line
     in req {reqMethod = read m, reqURI = u}
 
@@ -66,9 +72,9 @@ addToRequestHeader line req =
     let [k, v] = splitOn ": " line 
     in req {reqHeader = M.insert k v (reqHeader req)}
 
--- ok that sucks, will find cleaner way
+-- ok that sucks, will find cleaner way -- TODO
 hasMethod :: String -> Bool
-hasMethod line = take (length "HTTP/1.1") (reverse line) == "1.1/PTTH"
+hasMethod line = take (length http11) (reverse line) == "1.1/PTTH"
 
 requestMethod :: Request -> Method
 requestMethod = reqMethod
@@ -94,12 +100,73 @@ readRequestData req handle =
 contentLength :: Request -> Int
 contentLength req = read $ fromMaybe "0" $ M.lookup "Content-Length" (reqHeader req)
 
+
+------- response helpers
+emptyResponse :: STM Response
+emptyResponse = newTVar $ Resp "" M.empty B.empty
+
+http11 :: String
+http11 = "HTTP/1.1"
+
+addToResponseHeader :: String -> String -> Response -> STM Response
+addToResponseHeader k v r = do 
+  modifyTVar' r (\x -> x {respHeader = M.insert k v (respHeader x)}) 
+  return r
+
+setResponseBody :: String -> Response -> STM Response
+setResponseBody body r = do
+  modifyTVar' r (\x -> x {respBody = B.pack body}) 
+  return r
+
+setContentType :: String -> Response -> STM Response
+setContentType = addToResponseHeader "Content-Type"
+
+setContentLength :: Int -> Response -> STM Response
+setContentLength n r = addToResponseHeader "Content-Length" (show n) r
+
+
+fromStatusLine :: Int -> String -> STM Response
+fromStatusLine code reason = newTVar $ Resp (http11 ++ (show code) ++ reason) M.empty B.empty
+
+four00 :: STM Response
+four00 = fromStatusLine 400 "Bad Request"
+
+four04Page :: String -> String
+four04Page url = 
+    renderHtml $ docTypeHtml $ do 
+      H.head $ do
+        H.title $ toHtml "Not Found"
+        H.body $ do
+                 H.h1 $ H.toHtml "Not Found"
+                 H.p $ H.toHtml $ "The URL requested at " ++ url ++ " was not found on this server."
+                   
+four04 :: String -> STM Response
+four04 url = do 
+  r <- fromStatusLine 404 "Not Found"
+  setContentType "text/html" r
+  setResponseBody (four04Page url) r
+  setContentLength (length $ four04Page url) r
+  
+-- add show instance or formatter for Response to send it back
+
+
+
+
+
 respond :: Handle -> Request -> IO ()
 respond handle req = case reqMethod req of
                        GET -> respondGet handle req
                        POST -> respondPost handle req
                        PUT -> respondPut handle req
-                       UNKNOWN -> error "Wrong type of request" -- TODO
+                       UNKNOWN -> error "Error"
+
+
+
+
+
+
+
+
 
 respondGet :: Handle -> Request -> IO ()
 respondGet handle req = do
@@ -132,8 +199,25 @@ server :: IO ()
 server = withSocketsDo $ do
   socket <- listenOn (PortNumber 8002)
   forever $ do
-      (handle, hostname, port) <- accept socket
+      (handle, _, _) <- N.accept socket
       forkIO $ serve handle
 
 main = server
+
+
+
+-- Date: Wed, 17 Jul 2013 22:27:47 GMT
+
+{-
+in response header:
+HTTP/1.1 code reason
+Date:
+Server:
+Last-Modified if GET
+Content-Length
+Content-Type
+
+
+-}
+
 
