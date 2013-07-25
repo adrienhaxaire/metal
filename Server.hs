@@ -10,22 +10,31 @@ import Data.List.Split
 import Data.Maybe
 import Text.Blaze.Html5 as H
 import Text.Blaze.Html5.Attributes as A
-import Text.Blaze.Html.Renderer.Pretty
+import Text.Blaze.Html.Renderer.String
+import System.Time
 
 
 
-data Resp = Resp { respStatusLine :: String
-                 , respHeader :: M.Map String String
-                 , respBody :: B.ByteString}
-           deriving Show
-
-type Response = TVar Resp
-
-data Method = GET | POST | PUT | UNKNOWN deriving Show
+data Method = GET 
+            | HEAD 
+            | POST 
+            | PUT 
+            | DELETE 
+            | TRACE 
+            | CONNECT 
+            | UNKNOWN deriving Show
 
 -- thank you Real World Haskell!
 instance Read Method where
-    readsPrec _ value = tryParse [("GET", GET), ("POST", POST), ("PUT", PUT), ("", UNKNOWN)]
+    readsPrec _ value = tryParse [("GET", GET)
+                                 , ("HEAD", HEAD)
+                                 , ("POST", POST)
+                                 , ("PUT", PUT)
+                                 , ("DELETE", DELETE)
+                                 , ("TRACE", TRACE)
+                                 , ("CONNECT", CONNECT)
+                                 , ("UNKNOWN", UNKNOWN)]
+    
         where tryParse [] = []
               tryParse ((attempt, result):xs) =
                       if take (length attempt) value == attempt
@@ -79,13 +88,8 @@ hasMethod line = take (length http11) (reverse line) == "1.1/PTTH"
 requestMethod :: Request -> Method
 requestMethod = reqMethod
 
-isRequestType :: Method -> Request -> Bool
-isRequestType m req = isJust $ M.lookup (show m) (reqHeader req)
-
-isGetRequest, isPostRequest, isPutRequest :: Request -> Bool
-isGetRequest = isRequestType GET
-isPostRequest = isRequestType POST
-isPutRequest = isRequestType PUT
+isRequestMethod :: Method -> Request -> Bool
+isRequestMethod m req = isJust $ M.lookup (show m) (reqHeader req)
 
 hasData :: Request -> Bool
 hasData req = isJust $ M.lookup "Content-Length" (reqHeader req)
@@ -101,9 +105,28 @@ contentLength :: Request -> Int
 contentLength req = read $ fromMaybe "0" $ M.lookup "Content-Length" (reqHeader req)
 
 
-------- response helpers
+------- response
+data Resp = Resp { respStatusLine :: String
+                 , respHeader :: M.Map String String
+                 , respBody :: B.ByteString}
+          deriving Show
+
+type Response = TVar Resp
+
+formatResponse :: Response -> STM B.ByteString
+formatResponse r = 
+    let f (x, y) = x ++ ": " ++ y ++ "\r\n" 
+    in do
+      resp <- readTVar r
+      let header = respStatusLine resp ++ (concatMap f . M.toList $ respHeader resp)
+      return $ B.concat [B.pack header, B.pack "\r\n", respBody resp]
+
+
 emptyResponse :: STM Response
 emptyResponse = newTVar $ Resp "" M.empty B.empty
+
+fromStatusLine :: Int -> String -> STM Response
+fromStatusLine code reason = newTVar $ Resp (http11 ++ " " ++ show code ++ " " ++ reason ++ "\r\n") M.empty B.empty
 
 http11 :: String
 http11 = "HTTP/1.1"
@@ -121,58 +144,43 @@ setResponseBody body r = do
 setContentType :: String -> Response -> STM Response
 setContentType = addToResponseHeader "Content-Type"
 
-setContentLength :: Int -> Response -> STM Response
-setContentLength n r = addToResponseHeader "Content-Length" (show n) r
-
-
-fromStatusLine :: Int -> String -> STM Response
-fromStatusLine code reason = newTVar $ Resp (http11 ++ (show code) ++ reason) M.empty B.empty
-
-four00 :: STM Response
-four00 = fromStatusLine 400 "Bad Request"
+setContentLength :: Response -> STM Response
+setContentLength r = do 
+  modifyTVar' r (\x -> x {respHeader = M.insert "Content-Length" (show $ B.length $ respBody x) $ respHeader x})
+  return r
 
 four04Page :: String -> String
-four04Page url = 
-    renderHtml $ docTypeHtml $ do 
-      H.head $ do
-        H.title $ toHtml "Not Found"
-        H.body $ do
-                 H.h1 $ H.toHtml "Not Found"
-                 H.p $ H.toHtml $ "The URL requested at " ++ url ++ " was not found on this server."
-                   
+four04Page url = renderHtml $ docTypeHtml $ do 
+                   H.head $ 
+                     H.title $ toHtml "Not Found"
+                   H.body $ do
+                     H.h1 $ H.toHtml "Not Found"
+                     H.p $ H.toHtml $ "The URL requested at " ++ url ++ " was not found on this server."
+
 four04 :: String -> STM Response
 four04 url = do 
   r <- fromStatusLine 404 "Not Found"
   setContentType "text/html" r
   setResponseBody (four04Page url) r
-  setContentLength (length $ four04Page url) r
-  
--- add show instance or formatter for Response to send it back
-
-
-
-
+  setContentLength r
 
 respond :: Handle -> Request -> IO ()
 respond handle req = case reqMethod req of
                        GET -> respondGet handle req
+                       HEAD -> error "HEAD"
                        POST -> respondPost handle req
                        PUT -> respondPut handle req
-                       UNKNOWN -> error "Error"
+                       DELETE -> error "DELETE"
+                       TRACE -> error "TRACE"
+                       CONNECT -> error "CONNECT"
+                       UNKNOWN -> error "UNKNOWN"
 
-
-
-
-
-
-
-
+answer :: Request -> IO B.ByteString
+answer req = atomically $ four04 (reqURI req) >>= formatResponse
 
 respondGet :: Handle -> Request -> IO ()
-respondGet handle req = do
-  hPutStrLn handle "HTTP/1.1 200 OK"
-  hPutStrLn handle "Content-Type: text/plain\n"
-  hPutStrLn handle $ show req
+respondGet handle req = answer req >>= B.hPut handle 
+
 
 respondPost :: Handle -> Request -> IO ()
 respondPost = respondGet
@@ -191,33 +199,14 @@ serve handle = do
   hSetBuffering handle NoBuffering
   request <- readRequest handle
   respond handle request
-  hClose handle -- do not close if keep alive
---  response <- respond request
---  hPutStr responseHeader
+  hClose handle -- do not close if keep alive ?
 
 server :: IO ()
-server = withSocketsDo $ do
-  socket <- listenOn (PortNumber 8002)
-  forever $ do
-      (handle, _, _) <- N.accept socket
-      forkIO $ serve handle
+server = withSocketsDo $ do 
+           socket <- listenOn (PortNumber 8002)
+           forever $ do
+             (handle, _, _) <- N.accept socket
+             forkIO $ serve handle
 
 main = server
-
-
-
--- Date: Wed, 17 Jul 2013 22:27:47 GMT
-
-{-
-in response header:
-HTTP/1.1 code reason
-Date:
-Server:
-Last-Modified if GET
-Content-Length
-Content-Type
-
-
--}
-
 
