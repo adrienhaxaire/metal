@@ -1,4 +1,3 @@
-metal
-=====
+# Metal
+Bare-bones web server fof haskell
 
-Pet project to learn the bare metal web.
